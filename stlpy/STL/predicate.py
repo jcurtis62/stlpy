@@ -51,6 +51,9 @@ class NonlinearPredicate(STLFormula):
     def is_conjunctive_state_formula(self):
         return True
     
+    def is_conjunction_or_disjunction(self):
+        return False
+    
     def get_all_inequalities(self):
         raise NotImplementedError("linear inequalities are not defined for nonlinear predicates")
 
@@ -100,7 +103,6 @@ class LinearPredicate(STLFormula):
 
     def robustness(self, y, t):
         assert isinstance(y, np.ndarray), "y must be a numpy array"
-        assert isinstance(t, int), "timestep t must be an integer"
         assert y.shape[0] == self.d, "y must be of shape (d,T)"
         assert y.shape[1] > t, "requested timestep %s, but y only has %s timesteps" % (t, y.shape[1])
 
@@ -128,4 +130,3 @@ class LinearPredicate(STLFormula):
             return "{ Predicate %s*y >= %s }" % (self.a, self.b)
         else:
             return "{ Predicate " + self.name + " }"
-

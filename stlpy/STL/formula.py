@@ -1,6 +1,7 @@
 import numpy as np
 from abc import ABC, abstractmethod
 from treelib import Tree
+# import interval
 
 class STLFormula(ABC):
     """
@@ -195,6 +196,27 @@ class STLFormula(ABC):
         if self.name is not None:
             formula.name = "always [%s,%s] %s" % (t1,t2,self.name)
         return formula
+    
+    def always_past(self, t1, t2):
+        """
+        Return a new class `STLTree` which ensures that this formula, phi, holds for all
+        timesteps between :math:`t_1` and :math:`t_2` as historical states.
+        """
+        
+        # I might need to write this with past time explicitly.
+        t1 *= -1
+        t2 *= -1 # these are past time formulas
+        
+        if t2 == -np.inf:
+            t2 = t1
+
+        self.pre_flag = True # historical data detected.
+        time_interval = [t for t in range(t1, t2-1, -1)]
+        subformula_list = [self for t in time_interval]
+        formula = STLTree(subformula_list, "and", time_interval, pre_flag=True)
+        if self.name is not None:
+            formula.name = "always_pt [%s, %s] %s" % (t1, t2, self.name)
+        return formula
 
     def eventually(self, t1, t2):
         """
@@ -217,6 +239,27 @@ class STLFormula(ABC):
         formula = STLTree(subformula_list, "or", time_interval)
         if self.name is not None:
             formula.name = "eventually [%s,%s] %s" % (t1,t2,self.name)
+        return formula
+    
+    def eventually_past(self, t1, t2):
+        """
+        Return a new class `STLTree` which ensures that this formula, phi, holds for at least one
+        timestep between :math:`t_1` and :math:`t_2` as historical states.
+        """
+        
+        # I might need to write this with past time explicitly.
+        t1 *= -1
+        t2 *= -1 # these are past time formulas
+        
+        if t2 == -np.inf:
+            t2 = t1
+
+        self.pre_flag = True # historical data detected.
+        time_interval = [t for t in range(t1, t2-1, -1)]
+        subformula_list = [self for t in time_interval]
+        formula = STLTree(subformula_list, "or", time_interval, pre_flag=True)
+        if self.name is not None:
+            formula.name = "eventually_pt [%s, %s] %s" % (t1, t2, self.name)
         return formula
 
     def until(self, other, t1, t2):
@@ -248,6 +291,31 @@ class STLFormula(ABC):
 
         # Then we take the disjunction over each of these formulas
         return STLTree(self_until_tprime, "or", [0 for i in range(len(self_until_tprime))])
+
+    def since(self, other, t1, t2):
+        """
+        Return a new :class:`.STLTree` :math:`\\varphi_{new}` which ensures that this
+        formula holds always between :math:`t_1` and :math:`t_2` time steps after
+        :math:`\\varphi_{other}` becomes true. If `t_2` is infinite, then only require
+        that this formula holds for one time step.
+        """
+
+        # I might need to write this with past time explicitly.
+        t1 *= -1
+        t2 *= -1 # these are past time formulas
+        
+        if t2 == -np.inf:
+            t2 = t1-1
+        
+        self_since_tprime = []
+        
+        for t_prime in range(t1, t2-1, -1):
+            time_interval = [t for t in range(t1, t_prime-1, -1)]
+            subformula_list = [other for t in range(t1, t_prime, -1)]
+            subformula_list.append(self) # swapped
+            self_since_tprime.append(STLTree(subformula_list, "and", time_interval, pre_flag=True))
+        
+        return STLTree(self_since_tprime, "or", [0 for i in range(len(self_since_tprime))])
 
     def get_all_conjunctive_state_formulas(self):
         """
@@ -322,7 +390,7 @@ class STLTree(STLFormula):
     :param timesteps:           A list of timesteps that the subformulas must hold at.
                                 This is needed to define the temporal operators.
     """
-    def __init__(self, subformula_list, combination_type, timesteps, name=None):
+    def __init__(self, subformula_list, combination_type, timesteps, name=None, pre_flag=False):
         # Record the dimension of the signal this formula is defined over
         self.d = subformula_list[0].d
 
@@ -346,14 +414,24 @@ class STLTree(STLFormula):
         # Save the given name for pretty printing
         self.name=name
 
+        # Create the Pre vector: see Fainekos, 2014.
+        self.pre = np.inf
+        self.pre_flag = pre_flag
+
     def negation(self):
         raise NotImplementedError("Only formulas in positive normal form are supported at this time")
 
-    def robustness(self, y, t):
+    def robustness(self, y, t, update_pre=False):
         if self.combination_type == "and":
-            return min( [formula.robustness(y,t+self.timesteps[i]) for i, formula in enumerate(self.subformula_list)] )
+            if self.pre_flag:
+                r = np.min( [formula.robustness(y,np.max(t+self.timesteps[i], 0)) for i, formula in enumerate(self.subformula_list)].append(self.pre) )
+                if update_pre:
+                    self.pre = r
+                return r
+            else:
+                return np.min( [np.atleast_1d(formula.robustness(y,t+self.timesteps[i])).flatten() for i, formula in enumerate(self.subformula_list)] )
         else: # combination_type == "or"
-            return max( [formula.robustness(y,t+self.timesteps[i]) for i, formula in enumerate(self.subformula_list)] )
+            return np.max( [np.atleast_1d(formula.robustness(y,np.max(t+self.timesteps[i], 0))) for i, formula in enumerate(self.subformula_list)] )
 
     def is_predicate(self):
         return False
@@ -375,6 +453,13 @@ class STLTree(STLFormula):
         children_match = all([s.is_conjunctive_state_formula() for s in self.subformula_list])
 
         return boolean_operation and children_match and self.combination_type == "and"
+    
+    # Is the current operator in the STLTree not a temporal operator?
+    # True = it is not a temporal operator
+    # False = it is a temporal operator
+    def is_conjunction_or_disjunction(self):
+        boolean_operator = all([self.timesteps[i] == self.timesteps[0] for i in range(len(self.timesteps))])
+        return boolean_operator
 
     def simplify(self):
         """
